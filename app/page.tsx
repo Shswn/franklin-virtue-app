@@ -7,7 +7,7 @@ import Link from 'next/link';
 import { virtues } from './data/virtues'; 
 import { quotes } from './data/quotes'; 
 
-import { Sparkles, BookOpen, AlertCircle, Edit3, ArrowRight, MessageCircle, X, Send, Quote as QuoteIcon } from 'lucide-react';
+import { Sparkles, BookOpen, AlertCircle, Edit3, ArrowRight, MessageCircle, X, Send, Quote as QuoteIcon, Lock, Loader2 } from 'lucide-react';
 import { Show, SignInButton, UserButton, useUser, useClerk } from "@clerk/nextjs";
 import { createClient } from "@supabase/supabase-js";
 
@@ -52,7 +52,6 @@ const modPositive = (n: number, m: number) => ((n % m) + m) % m;
 const MAX_CHAT_LIMIT = 5;
 
 export default function VirtueHome() {
-  // 提取 user 对象，用于绑定数据库记录与拦截未登录动作
   const { isSignedIn, user } = useUser();
   const clerk = useClerk();
 
@@ -72,7 +71,13 @@ export default function VirtueHome() {
   const [isTyping, setIsTyping] = useState(false);
   const [chatCount, setChatCount] = useState(0);
 
-  // 初始化加载：名言、本地缓存、以及最重要的云端数据同步
+  // --- 权限与弹窗状态 ---
+  const [isAuthorized, setIsAuthorized] = useState<boolean | null>(null);
+  const [showInviteModal, setShowInviteModal] = useState(false);
+  const [inviteCode, setInviteCode] = useState("");
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [authError, setAuthError] = useState("");
+
   useEffect(() => {
     const now = new Date();
     const start = new Date(now.getFullYear(), 0, 0);
@@ -91,20 +96,30 @@ export default function VirtueHome() {
       } catch (e) { console.error(e); }
     }
 
-    // --- 核心拉取：如果用户已登录，从 Supabase 拉取打卡记录 ---
-    const fetchCloudLogs = async () => {
+    // --- 核心权限检查与拉取 ---
+    const checkAccessAndFetch = async () => {
       if (isSignedIn && user) {
-        const { data } = await supabase
-          .from('failure_logs')
-          .select('date, virtue, note')
-          .eq('user_id', user.id);
-          
-        if (data) {
-          setFailureLogs(data);
-          localStorage.setItem("franklin_failures", JSON.stringify(data)); 
+        const { data: accessData } = await supabase
+          .from('user_access')
+          .select('*')
+          .eq('user_id', user.id)
+          .single();
+
+        if (accessData) {
+          setIsAuthorized(true);
+          const { data } = await supabase
+            .from('failure_logs')
+            .select('date, virtue, note')
+            .eq('user_id', user.id);
+            
+          if (data) {
+            setFailureLogs(data);
+            localStorage.setItem("franklin_failures", JSON.stringify(data)); 
+          }
+        } else {
+          setIsAuthorized(false);
         }
       } else {
-        // 未登录时读取本地
         const storedFailures = localStorage.getItem('franklin_failures');
         if (storedFailures) {
           try { setFailureLogs(JSON.parse(storedFailures)); } catch (e) { console.error(e); }
@@ -112,12 +127,11 @@ export default function VirtueHome() {
       }
     };
     
-    fetchCloudLogs();
+    checkAccessAndFetch();
   }, [isSignedIn, user]);
 
   useEffect(() => { localStorage.setItem('franklin_week_start', weekStartKey); }, [weekStartKey]);
 
-  // 日期计算逻辑
   const weekStartLocal = parseDateKeyToLocalMidnight(weekStartKey);
   const weekDayKeys = Array.from({ length: 7 }, (_, i) => toDateKey(addDaysLocal(weekStartLocal, i)));
   const weekDayLabels = weekDayKeys.map(key => {
@@ -130,12 +144,51 @@ export default function VirtueHome() {
   const diffDays = Math.floor((todayLocalMidnight.getTime() - weekStartLocal.getTime()) / MS_PER_DAY);
   const currentVirtue = virtues[modPositive(Math.floor(diffDays / 7), virtues.length)];
 
-  // --- 拦截与弹窗逻辑 ---
-  const openAuditModal = (v: string, dKey: string, dLabel: string) => {
+  // --- 权限拦截器 ---
+  const requireAuth = () => {
     if (!isSignedIn) { 
       clerk.openSignIn(); 
-      return; 
+      return false; 
     }
+    if (isAuthorized === false) {
+      setShowInviteModal(true);
+      return false;
+    }
+    return true;
+  };
+
+  // --- 验证邀请码的逻辑 ---
+  const handleVerifyCode = async () => {
+    if (!inviteCode.trim() || !user) return;
+    setIsVerifying(true);
+    setAuthError("");
+
+    const codeUpper = inviteCode.trim().toUpperCase();
+    const { data: codeData } = await supabase
+      .from("invite_codes")
+      .select("*")
+      .eq("code", codeUpper)
+      .single();
+
+    if (!codeData || codeData.used_count >= codeData.max_uses) {
+      setAuthError("Invalid or fully claimed access code.");
+      setIsVerifying(false);
+      return;
+    }
+
+    await supabase.from("invite_codes").update({ used_count: codeData.used_count + 1 }).eq("id", codeData.id);
+    await supabase.from("user_access").insert({ user_id: user.id, code_used: codeUpper });
+
+    setIsAuthorized(true);
+    setShowInviteModal(false);
+    setIsVerifying(false);
+
+    const { data } = await supabase.from('failure_logs').select('date, virtue, note').eq('user_id', user.id);
+    if (data) setFailureLogs(data);
+  };
+
+  const openAuditModal = (v: string, dKey: string, dLabel: string) => {
+    if (!requireAuth()) return;
     setAuditModal({
       isOpen: true, 
       virtue: v, 
@@ -145,61 +198,40 @@ export default function VirtueHome() {
     });
   };
 
-  // --- 云端同步 1：网格黑点弹窗记录 ---
   const saveAuditNote = async () => {
     const trimmed = auditModal.note.trim();
     if (!isSignedIn || !user) return;
 
-    // 1. 乐观更新 UI（页面秒级响应）
     const without = failureLogs.filter(l => !(l.virtue === auditModal.virtue && l.date === auditModal.dateKey));
     const next = trimmed ? [...without, { date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed }] : without;
     setFailureLogs(next);
     setAuditModal({ ...auditModal, isOpen: false });
 
-    // 2. 写入 Supabase 数据库
-    await supabase
-      .from('failure_logs')
-      .delete()
-      .match({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue });
-      
+    await supabase.from('failure_logs').delete().match({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue });
     if (trimmed) {
-      await supabase
-        .from('failure_logs')
-        .insert({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed });
+      await supabase.from('failure_logs').insert({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed });
     }
   };
 
-  // --- 云端同步 2：左侧快速记录 ---
   const saveQuickFailure = async () => {
-    if (!isSignedIn || !user) { 
-      clerk.openSignIn(); 
-      return; 
-    }
+    if (!requireAuth()) return;
     if (!note.trim()) return;
 
     const todayStr = toDateKey(new Date());
     const trimmedNote = note.trim();
 
-    // 1. 乐观更新 UI
     const without = failureLogs.filter(l => !(l.virtue === selectedVirtue && l.date === todayStr));
     const next = [...without, { date: todayStr, virtue: selectedVirtue, note: trimmedNote }];
     setFailureLogs(next);
     setNote("");
 
-    // 2. 写入 Supabase 数据库
-    await supabase
-      .from('failure_logs')
-      .delete()
-      .match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
-      
-    await supabase
-      .from('failure_logs')
-      .insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
-    
+    await supabase.from('failure_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
+    await supabase.from('failure_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
     alert("Failure logged and synced to cloud successfully.");
   };
 
   const handleSendMessage = async () => {
+    if (!requireAuth()) return;
     if (!chatInput.trim()) return;
     if (chatCount >= MAX_CHAT_LIMIT) {
       setChatMessages(prev => [...prev, { role: 'user', content: chatInput }, { role: 'assistant', content: "My friend, our dialogue for today has reached its limit. Let us reflect and meet again tomorrow." }]);
@@ -229,6 +261,46 @@ export default function VirtueHome() {
   return (
     <div className="min-h-screen bg-[#FDFBF7] text-[#1B2B3A] pb-20 relative font-sans">
       
+      {/* 邀请码弹窗 */}
+      {showInviteModal && (
+        <div className="fixed inset-0 bg-[#1B2B3A]/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+          <div className="bg-white p-10 md:p-14 rounded-[2.5rem] shadow-2xl border border-slate-200 w-full max-w-md text-center animate-in fade-in zoom-in-95 relative">
+            <button 
+              onClick={() => setShowInviteModal(false)} 
+              className="absolute top-6 right-6 text-slate-400 hover:text-[#1B2B3A] transition-colors cursor-pointer"
+            >
+              <X size={24} />
+            </button>
+            <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-8 border border-slate-100 shadow-inner">
+              <Lock size={32} className="text-[#7B1B1B]" />
+            </div>
+            <h2 className="text-3xl font-serif font-bold mb-3 tracking-tight">Restricted Access</h2>
+            <p className="text-sm text-slate-500 font-serif leading-relaxed mb-8">
+              Please enter your exclusive access code to unlock the interactive features of the Lab.
+            </p>
+            
+            <input 
+              type="text" 
+              value={inviteCode}
+              onChange={(e) => setInviteCode(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleVerifyCode()}
+              placeholder="e.g. MASTER-FRANKLIN"
+              className="w-full text-center px-6 py-4 bg-slate-50 border border-slate-200 rounded-2xl mb-4 font-mono uppercase tracking-widest text-sm outline-none focus:border-[#1B2B3A] transition-colors"
+            />
+            
+            {authError && <p className="text-xs text-[#7B1B1B] font-bold mb-4 animate-pulse">{authError}</p>}
+            
+            <button 
+              onClick={handleVerifyCode}
+              disabled={isVerifying || !inviteCode}
+              className="w-full bg-[#1B2B3A] text-white py-4 rounded-2xl font-bold uppercase tracking-widest text-xs hover:bg-slate-800 transition-colors disabled:opacity-50 flex justify-center items-center cursor-pointer"
+            >
+              {isVerifying ? <Loader2 className="animate-spin" size={16} /> : "Unlock the Lab"}
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 复盘弹窗 */}
       {auditModal.isOpen && (
         <div className="fixed inset-0 bg-[#1B2B3A]/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
@@ -362,7 +434,7 @@ export default function VirtueHome() {
               <h2 className="text-2xl font-serif font-bold flex items-center text-[#1B2B3A]">
                 <Edit3 size={24} className="mr-3 text-[#7B1B1B]" /> Franklin's Grid
               </h2>
-              <div className="flex items-center gap-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm">
+              <div className="flex items-center gap-3 bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm" onClickCapture={(e) => { if (!requireAuth()) { e.preventDefault(); e.stopPropagation(); } }}>
                 <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400 ml-2">Week Start:</span>
                 <input 
                   type="date" 
@@ -470,7 +542,10 @@ export default function VirtueHome() {
           </div>
         )}
         <button 
-          onClick={() => setIsChatOpen(!isChatOpen)} 
+          onClick={() => {
+            if (!isChatOpen && !requireAuth()) return;
+            setIsChatOpen(!isChatOpen);
+          }} 
           className="bg-[#7B1B1B] text-white p-4 rounded-full shadow-2xl hover:scale-110 transition-transform cursor-pointer"
         >
           {isChatOpen ? <X size={28} /> : <MessageCircle size={28} />}
