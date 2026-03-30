@@ -1,0 +1,21 @@
+{
+    "name": "Franklin's Virtue Tracker",
+    "short_name": "Virtues",
+    "description": "Track your virtues based on Benjamin Franklin and I-Ching philosophy.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#FDFBF7",
+    "theme_color": "#1B2B3A",
+    "icons": [
+      {
+        "src": "/icon-1000x1000.png",
+        "sizes": "1000x1000",
+        "type": "image/png"
+      },
+      {
+        "src": "/icon-1000x1000.png",
+        "sizes": "any",
+        "purpose": "any maskable"
+      }
+    ]
+  }
