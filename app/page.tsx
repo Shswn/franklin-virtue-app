@@ -236,7 +236,7 @@ export default function VirtueHome() {
   };
 
   const saveQuickFailure = async () => {
-    if (!requireAuth()) return;
+    if (!requireAuth() || !user) return; // 这里加了 || !user
     if (!note.trim()) return;
 
     const todayStr = toDateKey(new Date());
