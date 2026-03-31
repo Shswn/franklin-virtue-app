@@ -52,14 +52,17 @@ const modPositive = (n: number, m: number) => ((n % m) + m) % m;
 const MAX_CHAT_LIMIT = 5;
 
 export default function VirtueHome() {
-  // 添加了 isLoaded，用来判断用户登录状态是否已经完全加载完成
   const { isSignedIn, user, isLoaded } = useUser();
   const clerk = useClerk();
 
   const [failureLogs, setFailureLogs] = useState<any[]>([]);
   const [weekStartKey, setWeekStartKey] = useState<string>(() => toDateKey(new Date()));
   const [selectedVirtue, setSelectedVirtue] = useState<string>(virtues[0].name);
+  
+  // --- 新增：双切页状态与双输入框状态 ---
+  const [logType, setLogType] = useState<'failure' | 'triumph'>('failure');
   const [note, setNote] = useState<string>("");
+  const [triumphNote, setTriumphNote] = useState<string>("");
   
   const [auditModal, setAuditModal] = useState({ isOpen: false, virtue: '', dateKey: '', dateLabel: '', note: '' });
   const [todaysQuote, setTodaysQuote] = useState(quotes[0]);
@@ -97,9 +100,7 @@ export default function VirtueHome() {
       } catch (e) { console.error(e); }
     }
 
-    // --- 核心权限检查与拉取 ---
     const checkAccessAndFetch = async () => {
-      // 必须等待 isLoaded 完成，避免出现刚刷新的闪烁状态
       if (!isLoaded) return; 
 
       if (isSignedIn && user) {
@@ -123,7 +124,7 @@ export default function VirtueHome() {
           if (logsError) console.error("加载记录失败:", logsError);
         } else {
           setIsAuthorized(false);
-          setShowInviteModal(true); // 如果登入了但是没权限，主动弹出验证码框
+          setShowInviteModal(true); 
         }
       } else {
         const storedFailures = localStorage.getItem('franklin_failures');
@@ -150,7 +151,6 @@ export default function VirtueHome() {
   const diffDays = Math.floor((todayLocalMidnight.getTime() - weekStartLocal.getTime()) / MS_PER_DAY);
   const currentVirtue = virtues[modPositive(Math.floor(diffDays / 7), virtues.length)];
 
-  // --- 【已修复】严谨的权限拦截器 ---
   const requireAuth = () => {
     if (!isLoaded) {
       alert("正在加载您的信息，请稍候...");
@@ -164,7 +164,6 @@ export default function VirtueHome() {
       alert("正在校验您的权限库，请稍候...");
       return false;
     }
-    // 必须严格为 true 才能放行，否则全部拦截并弹窗
     if (isAuthorized !== true) {
       setShowInviteModal(true);
       return false;
@@ -172,7 +171,6 @@ export default function VirtueHome() {
     return true;
   };
 
-  // --- 验证邀请码的逻辑 ---
   const handleVerifyCode = async () => {
     if (!inviteCode.trim() || !user) return;
     setIsVerifying(true);
@@ -202,7 +200,6 @@ export default function VirtueHome() {
     if (data) setFailureLogs(data);
   };
 
-  // --- 【已修复】增加保存时错误处理的复盘记录 ---
   const openAuditModal = (v: string, dKey: string, dLabel: string) => {
     if (!requireAuth()) return;
     setAuditModal({
@@ -218,45 +215,48 @@ export default function VirtueHome() {
     const trimmed = auditModal.note.trim();
     if (!requireAuth() || !user) return;
 
-    // 先在本地触发状态更新，让UI立即刷新
     const without = failureLogs.filter(l => !(l.virtue === auditModal.virtue && l.date === auditModal.dateKey));
     const next = trimmed ? [...without, { date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed }] : without;
     setFailureLogs(next);
     setAuditModal({ ...auditModal, isOpen: false });
 
-    // 提交到云端，增加错误监测
     await supabase.from('failure_logs').delete().match({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue });
     if (trimmed) {
       const { error } = await supabase.from('failure_logs').insert({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed });
       if (error) {
         console.error("Supabase Save Error:", error);
-        alert(`保存云端失败，请检查 Supabase 表配置（如 RLS / user_id字段是否为text）\n错误详情: ${error.message}`);
+        alert(`保存云端失败，请检查 Supabase 表配置\n错误详情: ${error.message}`);
       }
     }
   };
 
-  const saveQuickFailure = async () => {
-    if (!requireAuth() || !user) return; // 这里加了 || !user
-    if (!note.trim()) return;
-
-    const todayStr = toDateKey(new Date());
-    const trimmedNote = note.trim();
-
-    // 先更新本地状态，确保表格立刻显示黑点
-    const without = failureLogs.filter(l => !(l.virtue === selectedVirtue && l.date === todayStr));
-    const next = [...without, { date: todayStr, virtue: selectedVirtue, note: trimmedNote }];
-    setFailureLogs(next);
-    setNote("");
-
-    // 提交到云端，增加错误监测
-    const { error: deleteError } = await supabase.from('failure_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
-    const { error: insertError } = await supabase.from('failure_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
+  // --- 新增：处理黑点和金点的双重逻辑 ---
+  const saveQuickLog = async () => {
+    if (!requireAuth() || !user) return;
     
-    if (insertError || deleteError) {
-      console.error("Supabase Save Error:", insertError || deleteError);
-      alert(`保存失败！(数据不会同步到其他设备)。\n错误详情: ${(insertError || deleteError)?.message}\n请检查 Supabase 设置！`);
+    const todayStr = toDateKey(new Date());
+    
+    if (logType === 'failure') {
+      if (!note.trim()) return;
+      const trimmedNote = note.trim();
+      const without = failureLogs.filter(l => !(l.virtue === selectedVirtue && l.date === todayStr));
+      setFailureLogs([...without, { date: todayStr, virtue: selectedVirtue, note: trimmedNote }]);
+      setNote("");
+
+      await supabase.from('failure_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
+      const { error } = await supabase.from('failure_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
+      if (error) alert(`保存黑点失败: ${error.message}`);
+      else alert("Failure logged successfully.");
+      
     } else {
-      alert("Failure logged and synced to cloud successfully.");
+      if (!triumphNote.trim()) return;
+      const trimmedNote = triumphNote.trim();
+      setTriumphNote(""); 
+
+      await supabase.from('triumph_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
+      const { error } = await supabase.from('triumph_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
+      if (error) alert(`保存高光时刻失败: ${error.message}`);
+      else alert("Triumph logged successfully! Check your 52-Week Curriculum.");
     }
   };
 
@@ -291,12 +291,9 @@ export default function VirtueHome() {
   return (
     <div className="min-h-screen bg-[#FDFBF7] text-[#1B2B3A] pb-20 relative font-sans">
       
-      {/* 邀请码弹窗 */}
       {showInviteModal && (
         <div className="fixed inset-0 bg-[#1B2B3A]/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
           <div className="bg-white p-10 md:p-14 rounded-[2.5rem] shadow-2xl border border-slate-200 w-full max-w-md text-center animate-in fade-in zoom-in-95 relative">
-            
-            {/* 只允许尚未登录的用户关掉弹窗随便看主页；如果你登入了但没码，不许关 */}
             {(!isSignedIn || isAuthorized !== false) && (
               <button 
                 onClick={() => setShowInviteModal(false)} 
@@ -305,7 +302,6 @@ export default function VirtueHome() {
                 <X size={24} />
               </button>
             )}
-
             <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-8 border border-slate-100 shadow-inner">
               <Lock size={32} className="text-[#7B1B1B]" />
             </div>
@@ -333,18 +329,15 @@ export default function VirtueHome() {
               {isVerifying ? <Loader2 className="animate-spin" size={16} /> : "Unlock the Lab"}
             </button>
             
-            {/* 假如不能关掉弹窗（登录了没权限），提供一个登出按钮让他能退出 */}
             {isSignedIn && isAuthorized === false && (
               <button onClick={() => clerk.signOut()} className="text-xs text-slate-400 hover:text-slate-600 underline">
                 Sign Out
               </button>
             )}
-
           </div>
         </div>
       )}
 
-      {/* 复盘弹窗 */}
       {auditModal.isOpen && (
         <div className="fixed inset-0 bg-[#1B2B3A]/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
           <div className="bg-white rounded-[2rem] p-10 w-full max-w-lg shadow-2xl animate-in fade-in zoom-in-95">
@@ -375,7 +368,6 @@ export default function VirtueHome() {
         </div>
       )}
 
-      {/* 顶部导航栏 */}
       <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md sticky top-0 z-50">
         <div className="mx-auto py-5 px-6 max-w-[1200px] flex items-center justify-between">
           <h1 className="text-2xl md:text-3xl font-serif font-bold tracking-tight">
@@ -397,7 +389,6 @@ export default function VirtueHome() {
       </header>
 
       <main className="mx-auto mt-12 px-6 max-w-[1200px]">
-        {/* 每日名言 */}
         <div className="flex flex-col items-center mb-12 text-center px-4 animate-in fade-in duration-700">
           <QuoteIcon size={24} className="text-[#7B1B1B]/40 mb-4" />
           <p className="text-xl md:text-2xl font-serif italic text-slate-700 max-w-3xl leading-relaxed">"{todaysQuote.en}"</p>
@@ -405,7 +396,6 @@ export default function VirtueHome() {
           <span className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#7B1B1B] mt-6">— {todaysQuote.author} —</span>
         </div>
 
-        {/* 美德展示卡片 */}
         <div className="bg-white border border-slate-200 shadow-md rounded-[2.5rem] grid grid-cols-1 md:grid-cols-2 mb-12 overflow-hidden">
           <div className="p-10 lg:p-14 flex flex-col bg-white">
             <span className="text-[11px] font-bold tracking-[0.2em] uppercase text-slate-400 mb-8 flex items-center gap-2">
@@ -445,12 +435,29 @@ export default function VirtueHome() {
           </div>
         </div>
 
-        {/* 记录与动态网格 */}
         <div className="bg-white border border-slate-200 shadow-md rounded-[2.5rem] grid grid-cols-1 lg:grid-cols-12 mb-12 overflow-hidden">
-          <div className="lg:col-span-4 p-8 md:p-10 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-100">
-            <h2 className="text-2xl font-serif font-bold mb-8 flex items-center text-[#7B1B1B]">
-              <AlertCircle size={22} className="mr-3" /> Log a Failure
+          
+          {/* 左侧：新增的双切页输入区域 */}
+          <div className="lg:col-span-4 p-8 md:p-10 flex flex-col border-b lg:border-b-0 lg:border-r border-slate-100 bg-white">
+            <div className="flex gap-2 mb-8 bg-slate-50 p-1.5 rounded-2xl border border-slate-200">
+              <button 
+                onClick={() => setLogType('failure')}
+                className={`flex-1 py-2.5 text-xs font-bold uppercase tracking-widest rounded-xl transition-all ${logType === 'failure' ? 'bg-white text-[#1B2B3A] shadow-sm' : 'text-slate-400 hover:text-slate-600 cursor-pointer'}`}
+              >
+                Shortfall
+              </button>
+              <button 
+                onClick={() => setLogType('triumph')}
+                className={`flex-1 py-2.5 text-xs font-bold uppercase tracking-widest rounded-xl transition-all flex items-center justify-center gap-1 ${logType === 'triumph' ? 'bg-white text-yellow-600 shadow-sm' : 'text-slate-400 hover:text-slate-600 cursor-pointer'}`}
+              >
+                <Sparkles size={14} /> Triumph
+              </button>
+            </div>
+
+            <h2 className={`text-2xl font-serif font-bold mb-6 flex items-center ${logType === 'failure' ? 'text-[#7B1B1B]' : 'text-yellow-600'}`}>
+              {logType === 'failure' ? <><AlertCircle size={22} className="mr-3" /> Log a Shortfall</> : <><Sparkles size={22} className="mr-3" /> Log Weekly Triumph</>}
             </h2>
+            
             <select 
               className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl text-sm mb-6 font-serif outline-none cursor-pointer" 
               value={selectedVirtue} 
@@ -458,15 +465,26 @@ export default function VirtueHome() {
             >
               {virtues.map(v => <option key={v.name} value={v.name}>{v.name} - {v.chineseName}</option>)}
             </select>
-            <textarea 
-              className="w-full p-5 bg-slate-50 border border-slate-200 rounded-xl text-sm flex-1 mb-8 resize-none outline-none font-serif min-h-[120px]" 
-              placeholder="Explain the shortfall..." 
-              value={note} 
-              onChange={(e) => setNote(e.target.value)} 
-            />
+
+            {logType === 'failure' ? (
+              <textarea 
+                className="w-full p-5 bg-slate-50 border border-slate-200 rounded-xl text-sm flex-1 mb-8 resize-none outline-none font-serif min-h-[120px]" 
+                placeholder="Explain the shortfall..." 
+                value={note} 
+                onChange={(e) => setNote(e.target.value)} 
+              />
+            ) : (
+              <textarea 
+                className="w-full p-5 bg-amber-50/50 border border-amber-100 rounded-xl text-sm flex-1 mb-8 resize-none outline-none font-serif min-h-[120px] placeholder:text-amber-800/40 text-amber-900" 
+                placeholder="Celebrate your growth. What did you do well regarding this virtue?" 
+                value={triumphNote} 
+                onChange={(e) => setTriumphNote(e.target.value)} 
+              />
+            )}
+
             <button 
-              onClick={saveQuickFailure} 
-              className="w-full bg-[#1B2B3A] text-white py-4 rounded-xl font-bold uppercase tracking-widest text-[10px] cursor-pointer hover:bg-slate-800 transition-colors"
+              onClick={saveQuickLog} 
+              className={`w-full text-white py-4 rounded-xl font-bold uppercase tracking-widest text-[10px] cursor-pointer transition-colors ${logType === 'failure' ? 'bg-[#1B2B3A] hover:bg-slate-800' : 'bg-yellow-600 hover:bg-yellow-700'}`}
             >
               Submit to Audit
             </button>
@@ -541,7 +559,6 @@ export default function VirtueHome() {
         </Link>
       </main>
 
-      {/* AI 助手 */}
       <div className="fixed bottom-8 right-8 z-[100] flex flex-col items-end">
         {isChatOpen && (
           <div className="bg-white border border-slate-200 shadow-2xl rounded-3xl w-80 md:w-96 mb-6 flex flex-col overflow-hidden animate-in slide-in-from-bottom-5">
