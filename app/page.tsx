@@ -52,7 +52,8 @@ const modPositive = (n: number, m: number) => ((n % m) + m) % m;
 const MAX_CHAT_LIMIT = 5;
 
 export default function VirtueHome() {
-  const { isSignedIn, user } = useUser();
+  // 添加了 isLoaded，用来判断用户登录状态是否已经完全加载完成
+  const { isSignedIn, user, isLoaded } = useUser();
   const clerk = useClerk();
 
   const [failureLogs, setFailureLogs] = useState<any[]>([]);
@@ -98,8 +99,11 @@ export default function VirtueHome() {
 
     // --- 核心权限检查与拉取 ---
     const checkAccessAndFetch = async () => {
+      // 必须等待 isLoaded 完成，避免出现刚刷新的闪烁状态
+      if (!isLoaded) return; 
+
       if (isSignedIn && user) {
-        const { data: accessData } = await supabase
+        const { data: accessData, error: accessError } = await supabase
           .from('user_access')
           .select('*')
           .eq('user_id', user.id)
@@ -107,7 +111,7 @@ export default function VirtueHome() {
 
         if (accessData) {
           setIsAuthorized(true);
-          const { data } = await supabase
+          const { data, error: logsError } = await supabase
             .from('failure_logs')
             .select('date, virtue, note')
             .eq('user_id', user.id);
@@ -116,8 +120,10 @@ export default function VirtueHome() {
             setFailureLogs(data);
             localStorage.setItem("franklin_failures", JSON.stringify(data)); 
           }
+          if (logsError) console.error("加载记录失败:", logsError);
         } else {
           setIsAuthorized(false);
+          setShowInviteModal(true); // 如果登入了但是没权限，主动弹出验证码框
         }
       } else {
         const storedFailures = localStorage.getItem('franklin_failures');
@@ -128,7 +134,7 @@ export default function VirtueHome() {
     };
     
     checkAccessAndFetch();
-  }, [isSignedIn, user]);
+  }, [isSignedIn, user, isLoaded]);
 
   useEffect(() => { localStorage.setItem('franklin_week_start', weekStartKey); }, [weekStartKey]);
 
@@ -144,13 +150,22 @@ export default function VirtueHome() {
   const diffDays = Math.floor((todayLocalMidnight.getTime() - weekStartLocal.getTime()) / MS_PER_DAY);
   const currentVirtue = virtues[modPositive(Math.floor(diffDays / 7), virtues.length)];
 
-  // --- 权限拦截器 ---
+  // --- 【已修复】严谨的权限拦截器 ---
   const requireAuth = () => {
+    if (!isLoaded) {
+      alert("正在加载您的信息，请稍候...");
+      return false;
+    }
     if (!isSignedIn) { 
       clerk.openSignIn(); 
       return false; 
     }
-    if (isAuthorized === false) {
+    if (isAuthorized === null) {
+      alert("正在校验您的权限库，请稍候...");
+      return false;
+    }
+    // 必须严格为 true 才能放行，否则全部拦截并弹窗
+    if (isAuthorized !== true) {
       setShowInviteModal(true);
       return false;
     }
@@ -187,6 +202,7 @@ export default function VirtueHome() {
     if (data) setFailureLogs(data);
   };
 
+  // --- 【已修复】增加保存时错误处理的复盘记录 ---
   const openAuditModal = (v: string, dKey: string, dLabel: string) => {
     if (!requireAuth()) return;
     setAuditModal({
@@ -200,16 +216,22 @@ export default function VirtueHome() {
 
   const saveAuditNote = async () => {
     const trimmed = auditModal.note.trim();
-    if (!isSignedIn || !user) return;
+    if (!requireAuth() || !user) return;
 
+    // 先在本地触发状态更新，让UI立即刷新
     const without = failureLogs.filter(l => !(l.virtue === auditModal.virtue && l.date === auditModal.dateKey));
     const next = trimmed ? [...without, { date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed }] : without;
     setFailureLogs(next);
     setAuditModal({ ...auditModal, isOpen: false });
 
+    // 提交到云端，增加错误监测
     await supabase.from('failure_logs').delete().match({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue });
     if (trimmed) {
-      await supabase.from('failure_logs').insert({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed });
+      const { error } = await supabase.from('failure_logs').insert({ user_id: user.id, date: auditModal.dateKey, virtue: auditModal.virtue, note: trimmed });
+      if (error) {
+        console.error("Supabase Save Error:", error);
+        alert(`保存云端失败，请检查 Supabase 表配置（如 RLS / user_id字段是否为text）\n错误详情: ${error.message}`);
+      }
     }
   };
 
@@ -220,14 +242,22 @@ export default function VirtueHome() {
     const todayStr = toDateKey(new Date());
     const trimmedNote = note.trim();
 
+    // 先更新本地状态，确保表格立刻显示黑点
     const without = failureLogs.filter(l => !(l.virtue === selectedVirtue && l.date === todayStr));
     const next = [...without, { date: todayStr, virtue: selectedVirtue, note: trimmedNote }];
     setFailureLogs(next);
     setNote("");
 
-    await supabase.from('failure_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
-    await supabase.from('failure_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
-    alert("Failure logged and synced to cloud successfully.");
+    // 提交到云端，增加错误监测
+    const { error: deleteError } = await supabase.from('failure_logs').delete().match({ user_id: user.id, date: todayStr, virtue: selectedVirtue });
+    const { error: insertError } = await supabase.from('failure_logs').insert({ user_id: user.id, date: todayStr, virtue: selectedVirtue, note: trimmedNote });
+    
+    if (insertError || deleteError) {
+      console.error("Supabase Save Error:", insertError || deleteError);
+      alert(`保存失败！(数据不会同步到其他设备)。\n错误详情: ${(insertError || deleteError)?.message}\n请检查 Supabase 设置！`);
+    } else {
+      alert("Failure logged and synced to cloud successfully.");
+    }
   };
 
   const handleSendMessage = async () => {
@@ -265,12 +295,17 @@ export default function VirtueHome() {
       {showInviteModal && (
         <div className="fixed inset-0 bg-[#1B2B3A]/80 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
           <div className="bg-white p-10 md:p-14 rounded-[2.5rem] shadow-2xl border border-slate-200 w-full max-w-md text-center animate-in fade-in zoom-in-95 relative">
-            <button 
-              onClick={() => setShowInviteModal(false)} 
-              className="absolute top-6 right-6 text-slate-400 hover:text-[#1B2B3A] transition-colors cursor-pointer"
-            >
-              <X size={24} />
-            </button>
+            
+            {/* 只允许尚未登录的用户关掉弹窗随便看主页；如果你登入了但没码，不许关 */}
+            {(!isSignedIn || isAuthorized !== false) && (
+              <button 
+                onClick={() => setShowInviteModal(false)} 
+                className="absolute top-6 right-6 text-slate-400 hover:text-[#1B2B3A] transition-colors cursor-pointer"
+              >
+                <X size={24} />
+              </button>
+            )}
+
             <div className="bg-slate-50 w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-8 border border-slate-100 shadow-inner">
               <Lock size={32} className="text-[#7B1B1B]" />
             </div>
@@ -293,10 +328,18 @@ export default function VirtueHome() {
             <button 
               onClick={handleVerifyCode}
               disabled={isVerifying || !inviteCode}
-              className="w-full bg-[#1B2B3A] text-white py-4 rounded-2xl font-bold uppercase tracking-widest text-xs hover:bg-slate-800 transition-colors disabled:opacity-50 flex justify-center items-center cursor-pointer"
+              className="w-full bg-[#1B2B3A] text-white py-4 rounded-2xl font-bold uppercase tracking-widest text-xs hover:bg-slate-800 transition-colors disabled:opacity-50 flex justify-center items-center cursor-pointer mb-3"
             >
               {isVerifying ? <Loader2 className="animate-spin" size={16} /> : "Unlock the Lab"}
             </button>
+            
+            {/* 假如不能关掉弹窗（登录了没权限），提供一个登出按钮让他能退出 */}
+            {isSignedIn && isAuthorized === false && (
+              <button onClick={() => clerk.signOut()} className="text-xs text-slate-400 hover:text-slate-600 underline">
+                Sign Out
+              </button>
+            )}
+
           </div>
         </div>
       )}
