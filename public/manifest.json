@@ -1,6 +1,6 @@
 {
-    "name": "Franklin's Virtue Tracker",
-    "short_name": "Virtues",
+    "name": "Virtue Ledger",
+    "short_name": "养正手记",
     "description": "Track your virtues based on Benjamin Franklin and I-Ching philosophy.",
     "start_url": "/",
     "display": "standalone",

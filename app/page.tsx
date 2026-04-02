@@ -371,7 +371,7 @@ export default function VirtueHome() {
       <header className="border-b border-slate-200 bg-white/80 backdrop-blur-md sticky top-0 z-50">
         <div className="mx-auto py-5 px-6 max-w-[1200px] flex items-center justify-between">
           <h1 className="text-2xl md:text-3xl font-serif font-bold tracking-tight">
-            Franklin's <span className="italic text-[#7B1B1B]">Virtue Tracker</span>
+            Virtue <span className="italic text-[#7B1B1B]">Ledger</span>
           </h1>
           <div className="flex items-center gap-4">
             <Show when="signed-out">

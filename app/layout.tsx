@@ -22,13 +22,13 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  title: "Franklin's Virtue Tracker",
+  title: "Virtue Ledger",
   description: "Track your virtues based on Benjamin Franklin and I-Ching philosophy.",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Virtues",
+    title: "养正手记",
   },
 };
 
