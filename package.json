@@ -12,22 +12,21 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@clerk/nextjs": "^7.0.7",
-    "@supabase/supabase-js": "^2.100.1",
-    "lucide-react": "^1.7.0",
-    "next": "16.2.1",
-    "openai": "^6.33.0",
-    "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "@clerk/nextjs": "latest",
+    "@supabase/supabase-js": "latest",
+    "lucide-react": "latest",
+    "next": "latest",
+    "openai": "latest",
+    "react": "latest",
+    "react-dom": "latest"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
+    "@tailwindcss/postcss": "latest",
     "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
     "eslint": "^9",
-    "eslint-config-next": "16.2.1",
-    "tailwindcss": "^4",
+    "eslint-config-next": "latest",
+    "tailwindcss": "latest",
     "typescript": "^5"
   }
-}
